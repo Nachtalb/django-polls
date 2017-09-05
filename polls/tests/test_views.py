@@ -1,101 +1,85 @@
-from django.test import TestCase
 from django.urls import reverse
-from freezegun import freeze_time
+from django.utils import timezone
+from polls.models import Question
+import datetime
 import pytest
 
-from polls import factories
 
-
-class QuestionIndexViewText(TestCase):
-    def test_no_questions(self):
+class TestQuestionIndexView:
+    @pytest.mark.django_db
+    def test_no_questions(self, client):
         """
         If no questions exist, an appropriate message is displayed.
         """
-        response = self.client.get(reverse('polls:index'))
+        response = client.get(reverse('polls:index'))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'No polls are available')
-        self.assertQuerysetEqual(response.context['latest_question_list'], [])
+        assert response.status_code == 200
+        assert 'No polls are available' in str(response.content)
+        assert set(tuple(response.context['latest_question_list'])) == \
+               set(Question.objects
+                   .filter(pub_date__lte=timezone.now())
+                   .order_by('-pub_date')[:5])
 
-    @freeze_time("Feb 1st, 2017")
-    def test_past_questions(self):
+    @pytest.mark.django_db
+    def test_past_questions(self, client, past_question):
         """
         Questions with a pub_date in the past are displayed on the index page.
         """
-        with freeze_time("Jan 1st, 2017"):
-            factories.QuestionFactory(question_text='Past question.')
-        response = self.client.get(reverse('polls:index'))
+        response = client.get(reverse('polls:index'))
 
-        self.assertQuerysetEqual(
-            response.context['latest_question_list'],
-            ['<Question: Past question.>']
-        )
+        assert set(tuple(response.context['latest_question_list'])) == \
+            set(Question.objects
+                .filter(pub_date__lte=timezone.now())
+                .order_by('-pub_date')[:5])
 
-    @freeze_time("Feb 1st, 2017")
-    def test_future_question_and_past_question(self):
+    @pytest.mark.django_db
+    def test_future_question_and_past_question(self, client, past_question,
+                                               future_question):
         """
         Even if both past and future questions exist, only the past questions
         are displayed.
         """
-        with freeze_time("Jan 1st, 2017"):
-            factories.QuestionFactory(question_text='Past question.')
-        with freeze_time("Mar 1st, 2017"):
-            factories.QuestionFactory(question_text='Past question.')
-        response = self.client.get(reverse('polls:index'))
+        response = client.get(reverse('polls:index'))
 
-        self.assertQuerysetEqual(
-            response.context['latest_question_list'],
-            ['<Question: Past question.>']
-        )
+        assert set(tuple(response.context['latest_question_list'])) == \
+               set(Question.objects
+                   .filter(pub_date__lte=timezone.now())
+                   .order_by('-pub_date')[:5])
 
-    @freeze_time("Feb 1st, 2017")
-    def test_two_past_questions(self):
+    @pytest.mark.django_db
+    def test_two_past_questions(self, client, past_question, question_factory):
         """
         The questions index page may display multiple questions.
         """
-        with freeze_time("Jan 1st, 2017"):
-            factories.QuestionFactory(question_text='Past question 1.')
+        # create a second one in the past.
+        question_factory(question_text='Past question.',
+                         pub_date=timezone.now() - datetime.timedelta(days=20))
+        response = client.get(reverse('polls:index'))
 
-        with freeze_time("Jan 2nd, 2017"):
-            factories.QuestionFactory(question_text='Past question 2.')
-
-        response = self.client.get(reverse('polls:index'))
-
-        self.assertQuerysetEqual(
-            response.context['latest_question_list'],
-            ['<Question: Past question 2.>', '<Question: Past question 1.>']
-        )
+        assert set(tuple(response.context['latest_question_list'])) == \
+               set(Question.objects
+                   .filter(pub_date__lte=timezone.now())
+                   .order_by('-pub_date')[:5])
 
 
 class TestQuestionDetailView:
-    @freeze_time("Feb 1st, 2017")
     @pytest.mark.django_db
-    def test_future_question(self, client):
+    def test_future_question(self, client, future_question):
         """
         The detail view of a question with a pub_date in the future returns a
         404 not found.
         """
-
-        with freeze_time("Feb 5th, 2017"):
-            future_question = factories.QuestionFactory(
-                question_text='Future question.')
-
         url = reverse('polls:detail', args=(future_question.id,))
         response = client.get(url)
 
         assert response.status_code == 404
 
-    @freeze_time("Feb 1st, 2017")
     @pytest.mark.django_db
-    def test_past_question(self, client):
+    def test_past_question(self, client, past_question):
         """
         The detail view of a question with a pub_date in the past displays the
         question's text.
         """
-        with freeze_time("Jan 28th, 2017"):
-            past_question = factories.QuestionFactory(
-                question_text='Past question.')
-
         url = reverse('polls:detail', args=(past_question.id,))
         response = client.get(url)
 
@@ -103,51 +87,51 @@ class TestQuestionDetailView:
 
 
 class TestQuestionVoteSelenium:
-    def test_vote_fields_exist(self, selenium, live_server):
+    def test_vote_fields_exist(self, selenium, live_server, past_question,
+                               choice_factory):
         """
         One submit button and two choice radio buttons are rendered.
         """
-        question = factories.QuestionFactory(question_text='Test Question')
-        factories.ChoiceFactory(choice_text="Choice 1", question=question)
-        factories.ChoiceFactory(choice_text="Choice 2", question=question)
+        choice_factory(choice_text="Choice 1", question=past_question)
+        choice_factory(choice_text="Choice 2", question=past_question)
 
-        selenium.get(
-            live_server.url + reverse('polls:detail', args=(question.id,)))
+        selenium.get(live_server.url + reverse('polls:detail',
+                                               args=(past_question.id,)))
 
         assert selenium.find_element_by_id('choice1')
         assert selenium.find_element_by_id('choice2')
         assert selenium.find_element_by_css_selector('input[type=submit]')
 
-    def test_vote_can_submit_with_valid_data(self, live_server, selenium):
+    def test_vote_can_submit_with_valid_data(self, live_server, selenium,
+                                             past_question, choice_factory):
         """
         The application redirects from vote to results.
         """
-        question = factories.QuestionFactory(question_text='Test Question')
-        factories.ChoiceFactory(choice_text="Choice 1", question=question)
-        factories.ChoiceFactory(choice_text="Choice 2", question=question)
+        choice_factory(choice_text="Choice 1", question=past_question)
+        choice_factory(choice_text="Choice 2", question=past_question)
 
-        selenium.get(
-            live_server.url + reverse('polls:detail', args=(question.id,)))
+        selenium.get(live_server.url + reverse('polls:detail',
+                                               args=(past_question.id,)))
         selenium.find_element_by_id('choice1').click()
         selenium.find_element_by_css_selector('input[type=submit]').click()
 
         assert selenium.current_url == \
-               live_server.url + reverse('polls:results', args=(question.id,))
+               live_server.url + reverse('polls:results', args=(past_question.id,))
 
-    def test_vote_can_submit_with_invalid_data(self, live_server, selenium):
+    def test_vote_can_submit_with_invalid_data(self, live_server, selenium,
+                                               past_question, choice_factory):
         """
         The application redirects back the the vote page if the sent data
         is invalid and an appropriate error message is shown.
         """
-        question = factories.QuestionFactory(question_text='Test Question')
-        factories.ChoiceFactory(choice_text="Choice 1", question=question)
-        factories.ChoiceFactory(choice_text="Choice 2", question=question)
+        choice_factory(choice_text="Choice 1", question=past_question)
+        choice_factory(choice_text="Choice 2", question=past_question)
 
-        selenium.get(
-            live_server.url + reverse('polls:detail', args=(question.id,)))
+        selenium.get(live_server.url + reverse('polls:detail',
+                                               args=(past_question.id,)))
         selenium.find_element_by_css_selector('input[type=submit]').click()
 
         assert selenium.current_url == \
-               live_server.url + reverse('polls:vote', args=(question.id,))
+               live_server.url + reverse('polls:vote', args=(past_question.id,))
         assert selenium.find_element_by_css_selector('body main p').text == \
             "You didn't select a choice."
